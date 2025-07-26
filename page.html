@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Group Video Call</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    #videos { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+    video { width: 100%; border: 1px solid #ccc; background: #000; }
+  </style>
+</head>
+<body>
+  <h1>Group Video Call</h1>
+  <button id="joinButton">Join Call</button>
+  <div id="videos"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mediasoup-client@3"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let device;
+    let rtpCapabilities;
+    let transport;
+    let producer;
+
+    // DOM elements
+    const joinButton = document.getElementById('joinButton');
+    const videosDiv = document.getElementById('videos');
+
+    // Join call button
+    joinButton.addEventListener('click', async () => {
+      await initDevice();
+      await createTransport();
+      await getMediaAndProduce();
+    });
+
+    async function initDevice() {
+      device = new mediasoupClient.Device();
+      const data = await fetch('/routerRtpCapabilities').then(res => res.json());
+      rtpCapabilities = data;
+      await device.load({ routerRtpCapabilities: rtpCapabilities });
+    }
+
+    async function createTransport() {
+      const { id, iceParameters, iceCandidates, dtlsParameters } = await socket.emitWithAck('createTransport', { sender: true });
+      
+      transport = device.createSendTransport({
+        id,
+        iceParameters,
+        iceCandidates,
+        dtlsParameters,
+      });
+
+      transport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+        socket.emit('connectTransport', { dtlsParameters }, () => callback());
+      });
+
+      transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+        socket.emit('produce', { kind, rtpParameters }, ({ id }) => callback({ id }));
+      });
+    }
+
+    async function getMediaAndProduce() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
+
+      // Display local video
+      const localVideo = document.createElement('video');
+      localVideo.srcObject = stream;
+      localVideo.autoplay = true;
+      localVideo.muted = true;
+      videosDiv.appendChild(localVideo);
+
+      // Produce video
+      producer = await transport.produce({ track: videoTrack });
+    }
+  </script>
+</body>
+</html>
