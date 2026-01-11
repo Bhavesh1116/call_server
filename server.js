@@ -1,104 +1,106 @@
+/**
+ * Improved server.js
+ * - dotenv for environment config
+ * - helmet for basic security headers
+ * - cors with configurable origin
+ * - express-rate-limit to reduce abuse
+ * - morgan for request logging
+ * - centralized error handling
+ * - graceful shutdown
+ * - basic input validation example
+ */
+
 const express = require('express');
-const mediasoup = require('mediasoup');
-const socketIO = require('socket.io');
-const path = require('path');
+const helmet = require('helmet');
+const cors = require('cors');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const { body, validationResult } = require('express-validator');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
+// Basic middleware
+app.use(helmet());
+app.use(express.json({ limit: '1mb' })); // parse JSON bodies
+app.use(express.urlencoded({ extended: false }));
 
-const server = app.listen(PORT, '0.0.0.0', () => { // Explicit 0.0.0.0 binding
-  console.log(`Server running on port ${PORT}`);
+// Logging
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('combined'));
+}
+
+// CORS (configure allowed origins via env)
+const allowedOrigin = process.env.CORS_ORIGIN || '*';
+app.use(cors({
+  origin: allowedOrigin,
+  optionsSuccessStatus: 204
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: parseInt(process.env.RATE_LIMIT_MAX || '60', 10), // limit each IP
+  standardHeaders: true,
+  legacyHeaders: false,
 });
+app.use(limiter);
 
-const io = socketIO(server, {
-  cors: {
-    origin: process.env.ALLOWED_ORIGIN || "*", // Restrict in production via ALLOWED_ORIGIN
-    methods: ["GET", "POST"]
+// Simple healthcheck
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+// Example route with validation
+app.post('/api/call',
+  body('phone').isString().notEmpty().withMessage('phone is required'),
+  body('message').isString().isLength({ min: 1 }).withMessage('message is required'),
+  (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    // Replace this with your actual call logic
+    const { phone, message } = req.body;
+    // example: callService.send({ phone, message })
+    return res.json({ ok: true, to: phone, message });
   }
+);
+
+// 404 handler
+app.use((req, res, next) => {
+  res.status(404).json({ error: 'Not Found' });
 });
 
-// Mediasoup setup
-let worker;
-let router;
+// central error handler
+app.use((err, req, res, next) => {
+  // Log error (could integrate with winston/Sentry)
+  console.error(err && err.stack ? err.stack : err);
+  const status = err.status || 500;
+  const message = process.env.NODE_ENV === 'production' ? 'Internal Server Error' : err.message;
+  res.status(status).json({ error: message });
+});
 
-(async () => {
-  try {
-    worker = await mediasoup.createWorker({
-      rtcMinPort: 40000, // Required for Render
-      rtcMaxPort: 49999
-    });
+// Start server with graceful shutdown
+const port = parseInt(process.env.PORT || '3000', 10);
+const server = app.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+});
 
-    worker.on('died', () => {
-      console.error('Mediasoup worker died, exiting in 2 seconds...');
-      setTimeout(() => process.exit(1), 2000);
-    });
+function shutdown(signal) {
+  console.log(`Received ${signal}. Shutting down gracefully...`);
+  server.close(() => {
+    console.log('Closed out remaining connections.');
+    process.exit(0);
+  });
 
-    router = await worker.createRouter({
-      mediaCodecs: [
-        { kind: 'audio', mimeType: 'audio/opus' },
-        { kind: 'video', mimeType: 'video/VP8' }
-      ]
-    });
-
-    console.log('Mediasoup worker and router created');
-  } catch (err) {
-    console.error('Failed to create mediasoup worker/router:', err);
+  // Force shut down after 10s
+  setTimeout(() => {
+    console.error('Forcing shutdown after 10s.');
     process.exit(1);
-  }
-})();
+  }, 10000);
+}
 
-// Route to expose router RTP capabilities — guard in case router isn't ready yet
-app.get('/routerRtpCapabilities', (req, res) => {
-  if (!router) {
-    return res.status(503).json({ error: 'Router not ready' });
-  }
-  res.json(router.rtpCapabilities);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Socket.io logic
-io.on('connection', (socket) => {
-  console.log('New peer connected:', socket.id);
-
-  socket.on('createTransport', async ({ sender } = {}, callback) => {
-    if (!callback || typeof callback !== 'function') {
-      console.warn('createTransport called without a callback from', socket.id);
-      return;
-    }
-
-    if (!router) {
-      return callback({ error: 'Router not ready' });
-    }
-
-    try {
-      const transport = await router.createWebRtcTransport({
-        listenIps: [
-          {
-            ip: '0.0.0.0',
-            announcedIp: process.env.RENDER_EXTERNAL_IP || undefined // use undefined when not set
-          }
-        ],
-        enableUdp: true,
-        enableTcp: true
-      });
-
-      callback({
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters
-      });
-    } catch (err) {
-      console.error('createWebRtcTransport error:', err);
-      callback({ error: err.message || 'createWebRtcTransport failed' });
-    }
-  });
-
-  // TODO: Implement other handlers (connectTransport, produce, consume, etc.) and cleanup on disconnect
-  socket.on('disconnect', () => {
-    console.log('Peer disconnected:', socket.id);
-    // TODO: close transports/producers/consumers owned by this socket
-  });
-});
+module.exports = app;
