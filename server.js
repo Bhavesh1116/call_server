@@ -6,7 +6,7 @@
  * - express-rate-limit to reduce abuse
  * - morgan for request logging
  * - centralized error handling
- * - graceful shutdown
+ * - 
  * - basic input validation example
  */
 
